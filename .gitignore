@@ -11,3 +11,4 @@ devenv.local.yaml
 
 # platformio
 .pio
+compile_commands.json
