@@ -1,16 +1,20 @@
 #include "console/console.h"
 #include "driver/gpio.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "host/ble_att.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
 #include "host/ble_hs.h"
+#include "host/ble_hs_mbuf.h"
 #include "host/ble_uuid.h"
 #include "host/util/util.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
@@ -21,13 +25,16 @@
 #define RELAY_GPIO 26
 #define REED_SWITCH_GPIO 27
 
-#define BLE_PASSKEY 123456
+#define DEFAULT_BLE_PASSKEY 123456
 
 #define RELAY_PULSE_MS 500
 
 static volatile bool relay_pulse_pending = false;
 static bool relay_active = false;
 static int64_t relay_pulse_start_ms = 0;
+
+static nvs_handle_t nvs_secrets_handle;
+static uint32_t ble_passkey;
 
 static const char *TAG = "main";
 
@@ -38,6 +45,9 @@ static const ble_uuid128_t status_chr_uuid =
     BLE_UUID128_INIT(0xa1, 0xb6, 0x98, 0x1f, 0x6a, 0x0d, 0x0b, 0x89, 0x33, 0x4f,
                      0x19, 0x1b, 0x01, 0x00, 0xaf, 0xc9);
 static const ble_uuid128_t control_chr_uuid =
+    BLE_UUID128_INIT(0xa1, 0xb6, 0x98, 0x1f, 0x6a, 0x0d, 0x0b, 0x89, 0x33, 0x4f,
+                     0x19, 0x1b, 0x02, 0x00, 0xaf, 0xc9);
+static const ble_uuid128_t change_passkey_chr_uuid =
     BLE_UUID128_INIT(0xa1, 0xb6, 0x98, 0x1f, 0x6a, 0x0d, 0x0b, 0x89, 0x33, 0x4f,
                      0x19, 0x1b, 0x02, 0x00, 0xaf, 0xc9);
 
@@ -64,6 +74,36 @@ static int control_access_cb(uint16_t conn_handle, uint16_t attr_handle,
   return 0;
 }
 
+static int change_passkey_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                    struct ble_gatt_access_ctxt *ctxt,
+                                    void *arg) {
+  if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+    return 0;
+  }
+
+  uint8_t payload[8];
+  uint16_t payload_len;
+  int rc =
+      ble_hs_mbuf_to_flat(ctxt->om, payload, sizeof(payload), &payload_len);
+  if (rc != 0 || payload_len != sizeof(payload)) {
+    return BLE_ATT_ERR_UNLIKELY;
+  }
+
+  uint32_t current_passkey;
+  uint32_t new_passkey;
+  memcpy(&current_passkey, payload, sizeof(new_passkey));
+  memcpy(&new_passkey, payload + sizeof(current_passkey), sizeof(new_passkey));
+
+  if (current_passkey != ble_passkey) {
+    return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
+  }
+
+  ble_passkey = new_passkey;
+  ESP_ERROR_CHECK(nvs_set_u32(nvs_secrets_handle, "ble_passkey", ble_passkey));
+  ESP_ERROR_CHECK(nvs_commit(nvs_secrets_handle));
+  return 0;
+}
+
 static const struct ble_gatt_chr_def gatt_chrs[] = {
     {
         .uuid = &status_chr_uuid.u,
@@ -75,6 +115,12 @@ static const struct ble_gatt_chr_def gatt_chrs[] = {
     {
         .uuid = &control_chr_uuid.u,
         .access_cb = control_access_cb,
+        .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC |
+                 BLE_GATT_CHR_F_WRITE_AUTHEN,
+    },
+    {
+        .uuid = &change_passkey_chr_uuid.u,
+        .access_cb = change_passkey_access_cb,
         .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC |
                  BLE_GATT_CHR_F_WRITE_AUTHEN,
     },
@@ -150,7 +196,7 @@ static int gap_event_handler(struct ble_gap_event *event, void *arg) {
     if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
       struct ble_sm_io pkey = {0};
       pkey.action = BLE_SM_IOACT_DISP;
-      pkey.passkey = BLE_PASSKEY;
+      pkey.passkey = ble_passkey;
       ble_sm_inject_io(event->passkey.conn_handle, &pkey);
     }
     return 0;
@@ -185,6 +231,19 @@ void app_main(void) {
     nvs_ret = nvs_flash_init();
   }
   ESP_ERROR_CHECK(nvs_ret);
+
+  ESP_ERROR_CHECK(nvs_open("secrets", NVS_READWRITE, &nvs_secrets_handle));
+
+  esp_err_t passkey_err =
+      nvs_get_u32(nvs_secrets_handle, "ble_passkey", &ble_passkey);
+  if (passkey_err == ESP_ERR_NVS_NOT_FOUND) {
+    ble_passkey = DEFAULT_BLE_PASSKEY;
+    ESP_ERROR_CHECK(
+        nvs_set_u32(nvs_secrets_handle, "ble_passkey", ble_passkey));
+    ESP_ERROR_CHECK(nvs_commit(nvs_secrets_handle));
+  } else {
+    ESP_ERROR_CHECK(passkey_err);
+  }
 
   nimble_port_init();
   ble_svc_gap_init();
