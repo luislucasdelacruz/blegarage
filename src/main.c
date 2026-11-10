@@ -26,6 +26,7 @@
 #define REED_SWITCH_GPIO 27
 
 #define DEFAULT_BLE_PASSKEY 123456
+#define DEFAULT_OTA_PASSWORD 123456
 
 #define RELAY_PULSE_MS 500
 
@@ -35,6 +36,7 @@ static int64_t relay_pulse_start_ms = 0;
 
 static nvs_handle_t nvs_secrets_handle;
 static uint32_t ble_passkey;
+static uint32_t ota_password;
 
 static const char *TAG = "main";
 
@@ -49,7 +51,10 @@ static const ble_uuid128_t control_chr_uuid =
                      0x19, 0x1b, 0x02, 0x00, 0xaf, 0xc9);
 static const ble_uuid128_t change_passkey_chr_uuid =
     BLE_UUID128_INIT(0xa1, 0xb6, 0x98, 0x1f, 0x6a, 0x0d, 0x0b, 0x89, 0x33, 0x4f,
-                     0x19, 0x1b, 0x02, 0x00, 0xaf, 0xc9);
+                     0x19, 0x1b, 0x03, 0x00, 0xaf, 0xc9);
+static const ble_uuid128_t change_ota_password_chr_uuid =
+    BLE_UUID128_INIT(0xa1, 0xb6, 0x98, 0x1f, 0x6a, 0x0d, 0x0b, 0x89, 0x33, 0x4f,
+                     0x19, 0x1b, 0x04, 0x00, 0xaf, 0xc9);
 
 static uint16_t status_val_handle;
 
@@ -104,6 +109,39 @@ static int change_passkey_access_cb(uint16_t conn_handle, uint16_t attr_handle,
   return 0;
 }
 
+static int change_ota_password_access_cb(uint16_t conn_handle,
+                                         uint16_t attr_handle,
+                                         struct ble_gatt_access_ctxt *ctxt,
+                                         void *arg) {
+  if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+    return 0;
+  }
+
+  uint8_t payload[8];
+  uint16_t payload_len;
+  int rc =
+      ble_hs_mbuf_to_flat(ctxt->om, payload, sizeof(payload), &payload_len);
+  if (rc != 0 || payload_len != sizeof(payload)) {
+    return BLE_ATT_ERR_UNLIKELY;
+  }
+
+  uint32_t current_password;
+  uint32_t new_password;
+  memcpy(&current_password, payload, sizeof(current_password));
+  memcpy(&new_password, payload + sizeof(current_password),
+         sizeof(new_password));
+
+  if (current_password != ota_password) {
+    return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
+  }
+
+  ota_password = new_password;
+  ESP_ERROR_CHECK(
+      nvs_set_u32(nvs_secrets_handle, "ota_password", ota_password));
+  ESP_ERROR_CHECK(nvs_commit(nvs_secrets_handle));
+  return 0;
+}
+
 static const struct ble_gatt_chr_def gatt_chrs[] = {
     {
         .uuid = &status_chr_uuid.u,
@@ -121,6 +159,12 @@ static const struct ble_gatt_chr_def gatt_chrs[] = {
     {
         .uuid = &change_passkey_chr_uuid.u,
         .access_cb = change_passkey_access_cb,
+        .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC |
+                 BLE_GATT_CHR_F_WRITE_AUTHEN,
+    },
+    {
+        .uuid = &change_ota_password_chr_uuid.u,
+        .access_cb = change_ota_password_access_cb,
         .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC |
                  BLE_GATT_CHR_F_WRITE_AUTHEN,
     },
@@ -243,6 +287,17 @@ void app_main(void) {
     ESP_ERROR_CHECK(nvs_commit(nvs_secrets_handle));
   } else {
     ESP_ERROR_CHECK(passkey_err);
+  }
+
+  esp_err_t ota_password_err =
+      nvs_get_u32(nvs_secrets_handle, "ota_password", &ota_password);
+  if (ota_password_err == ESP_ERR_NVS_NOT_FOUND) {
+    ota_password = DEFAULT_OTA_PASSWORD;
+    ESP_ERROR_CHECK(
+        nvs_set_u32(nvs_secrets_handle, "ota_password", ota_password));
+    ESP_ERROR_CHECK(nvs_commit(nvs_secrets_handle));
+  } else {
+    ESP_ERROR_CHECK(ota_password_err);
   }
 
   nimble_port_init();
