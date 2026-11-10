@@ -250,8 +250,14 @@ void app_main(void) {
   ble_svc_gatt_init();
   ble_svc_gap_device_name_set("GarageDoor");
 
-  ble_gatts_count_cfg(gatt_svcs);
-  ble_gatts_add_svcs(gatt_svcs);
+  int rc = ble_gatts_count_cfg(gatt_svcs);
+  if (rc != 0) {
+    ESP_LOGE(TAG, "ble_gatts_count_cfg failed: %d", rc);
+  }
+  rc = ble_gatts_add_svcs(gatt_svcs);
+  if (rc != 0) {
+    ESP_LOGE(TAG, "ble_gatts_add_svcs failed: %d", rc);
+  }
 
   ble_hs_cfg.sync_cb = on_sync;
   ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
