@@ -322,10 +322,16 @@ static void start_advertising(void) {
 
   struct ble_hs_adv_fields fields = {0};
   fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-  fields.name = (const uint8_t *)name;
-  fields.name_len = strlen(name);
-  fields.name_is_complete = 1;
+  fields.uuids128 = &svc_uuid;
+  fields.num_uuids128 = 1;
+  fields.uuids128_is_complete = 1;
   ble_gap_adv_set_fields(&fields);
+
+  struct ble_hs_adv_fields rsp_fields = {0};
+  rsp_fields.name = (const uint8_t *)name;
+  rsp_fields.name_len = strlen(name);
+  rsp_fields.name_is_complete = 1;
+  ble_gap_adv_rsp_set_fields(&rsp_fields);
 
   struct ble_gap_adv_params adv_params = {0};
   adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;

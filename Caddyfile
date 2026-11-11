@@ -1,0 +1,10 @@
+{
+	auto_https disable_redirects
+}
+
+:8443 {
+	bind 0.0.0.0
+	tls .devenv/state/tls/cert.pem .devenv/state/tls/key.pem
+	root * ./webapp
+	file_server
+}

@@ -1,0 +1,89 @@
+:root {
+  --bg: #16181d;
+  --card: #22252b;
+  --text: #e8e8ea;
+  --muted: #8a8d94;
+  --accent: #4a90d9;
+  --accent-hover: #5a9fe6;
+  --good: #3dbd6e;
+  --bad: #d9534f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.card {
+  background: var(--card);
+  border-radius: 16px;
+  padding: 40px 32px;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  width: 280px;
+}
+
+h1 {
+  margin: 0 0 24px;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.status {
+  margin: 0 0 28px;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.status--unknown {
+  color: var(--muted);
+}
+
+.status--open {
+  color: var(--bad);
+}
+
+.status--closed {
+  color: var(--good);
+}
+
+button {
+  display: block;
+  width: 100%;
+  margin: 10px 0;
+  padding: 14px;
+  font-size: 16px;
+  font-weight: 600;
+  border: none;
+  border-radius: 10px;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+button:disabled {
+  background: #3a3d44;
+  color: var(--muted);
+  cursor: not-allowed;
+}

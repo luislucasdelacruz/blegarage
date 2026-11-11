@@ -9,3 +9,6 @@ monitor:
 
 compiledb:
 	pio run -t compiledb
+
+serve:
+	caddy run --config Caddyfile --adapter caddyfile
