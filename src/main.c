@@ -2,6 +2,8 @@
 #include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -30,6 +32,14 @@
 
 #define RELAY_PULSE_MS 500
 
+#define OTA_CMD_START 0x01
+#define OTA_CMD_END 0x02
+#define OTA_CMD_ABORT 0x03
+
+static esp_ota_handle_t ota_handle;
+static const esp_partition_t *ota_update_partition = NULL;
+static bool ota_in_progress = false;
+
 static volatile bool relay_pulse_pending = false;
 static bool relay_active = false;
 static int64_t relay_pulse_start_ms = 0;
@@ -55,6 +65,12 @@ static const ble_uuid128_t change_passkey_chr_uuid =
 static const ble_uuid128_t change_ota_password_chr_uuid =
     BLE_UUID128_INIT(0xa1, 0xb6, 0x98, 0x1f, 0x6a, 0x0d, 0x0b, 0x89, 0x33, 0x4f,
                      0x19, 0x1b, 0x04, 0x00, 0xaf, 0xc9);
+static const ble_uuid128_t ota_control_chr_uuid =
+    BLE_UUID128_INIT(0xa1, 0xb6, 0x98, 0x1f, 0x6a, 0x0d, 0x0b, 0x89, 0x33, 0x4f,
+                     0x19, 0x1b, 0x05, 0x00, 0xaf, 0xc9);
+static const ble_uuid128_t ota_data_chr_uuid =
+    BLE_UUID128_INIT(0xa1, 0xb6, 0x98, 0x1f, 0x6a, 0x0d, 0x0b, 0x89, 0x33, 0x4f,
+                     0x19, 0x1b, 0x06, 0x00, 0xaf, 0xc9);
 
 static uint16_t status_val_handle;
 
@@ -142,6 +158,108 @@ static int change_ota_password_access_cb(uint16_t conn_handle,
   return 0;
 }
 
+static int ota_control_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                 struct ble_gatt_access_ctxt *ctxt, void *arg) {
+  if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+    return 0;
+  }
+
+  uint8_t payload[5];
+  uint16_t payload_len;
+  int rc =
+      ble_hs_mbuf_to_flat(ctxt->om, payload, sizeof(payload), &payload_len);
+  if (rc != 0 || payload_len < 1) {
+    return BLE_ATT_ERR_UNLIKELY;
+  }
+
+  uint8_t command = payload[0];
+
+  if (command == OTA_CMD_START) {
+    if (payload_len != sizeof(payload) || ota_in_progress) {
+      return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    uint32_t provided_password;
+    memcpy(&provided_password, payload + 1, sizeof(provided_password));
+    if (provided_password != ota_password) {
+      return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;
+    }
+
+    ota_update_partition = esp_ota_get_next_update_partition(NULL);
+    if (ota_update_partition == NULL) {
+      ESP_LOGE(TAG, "No OTA update partition available");
+      return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    esp_err_t err =
+        esp_ota_begin(ota_update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "esp_ota_begin failed: %d", err);
+      return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    ota_in_progress = true;
+    ESP_LOGI(TAG, "OTA started, writing to partition '%s'",
+             ota_update_partition->label);
+  } else if (command == OTA_CMD_END) {
+    if (!ota_in_progress) {
+      return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    esp_err_t err = esp_ota_end(ota_handle);
+    ota_in_progress = false;
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "esp_ota_end failed: %d", err);
+      return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    err = esp_ota_set_boot_partition(ota_update_partition);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %d", err);
+      return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    ESP_LOGI(TAG, "OTA complete, rebooting into new firmware");
+    esp_restart();
+  } else if (command == OTA_CMD_ABORT) {
+    if (ota_in_progress) {
+      esp_ota_abort(ota_handle);
+      ota_in_progress = false;
+      ESP_LOGI(TAG, "OTA aborted");
+    }
+  } else {
+    return BLE_ATT_ERR_UNLIKELY;
+  }
+
+  return 0;
+}
+
+static int ota_data_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                              struct ble_gatt_access_ctxt *ctxt, void *arg) {
+  if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+    return 0;
+  }
+
+  if (!ota_in_progress) {
+    return BLE_ATT_ERR_UNLIKELY;
+  }
+
+  uint8_t chunk[512];
+  uint16_t chunk_len;
+  int rc = ble_hs_mbuf_to_flat(ctxt->om, chunk, sizeof(chunk), &chunk_len);
+  if (rc != 0) {
+    return BLE_ATT_ERR_UNLIKELY;
+  }
+
+  esp_err_t err = esp_ota_write(ota_handle, chunk, chunk_len);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_ota_write failed: %d", err);
+    return BLE_ATT_ERR_UNLIKELY;
+  }
+
+  return 0;
+}
+
 static const struct ble_gatt_chr_def gatt_chrs[] = {
     {
         .uuid = &status_chr_uuid.u,
@@ -165,6 +283,18 @@ static const struct ble_gatt_chr_def gatt_chrs[] = {
     {
         .uuid = &change_ota_password_chr_uuid.u,
         .access_cb = change_ota_password_access_cb,
+        .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC |
+                 BLE_GATT_CHR_F_WRITE_AUTHEN,
+    },
+    {
+        .uuid = &ota_control_chr_uuid.u,
+        .access_cb = ota_control_access_cb,
+        .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC |
+                 BLE_GATT_CHR_F_WRITE_AUTHEN,
+    },
+    {
+        .uuid = &ota_data_chr_uuid.u,
+        .access_cb = ota_data_access_cb,
         .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC |
                  BLE_GATT_CHR_F_WRITE_AUTHEN,
     },
@@ -208,7 +338,13 @@ static void start_advertising(void) {
                     gap_event_handler, NULL);
 }
 
-static void on_sync(void) { start_advertising(); }
+static void on_sync(void) {
+  start_advertising();
+  esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_ota_mark_app_valid_cancel_rollback failed: %d", err);
+  }
+}
 
 static int gap_event_handler(struct ble_gap_event *event, void *arg) {
   switch (event->type) {
@@ -321,10 +457,6 @@ void app_main(void) {
   ble_hs_cfg.sm_sc = 1;
 
   nimble_port_freertos_init(host_task);
-
-  gpio_set_level(RELAY_GPIO, 0);
-  vTaskDelay(pdMS_TO_TICKS(1000));
-  gpio_set_level(RELAY_GPIO, 1);
 
   int previous_value = -1;
   int current_value = 0;
