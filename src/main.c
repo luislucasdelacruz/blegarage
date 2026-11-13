@@ -344,7 +344,41 @@ static void start_advertising(void) {
                     gap_event_handler, NULL);
 }
 
+static void restore_resolving_list(void) {
+  extern int ble_hs_pvcy_add_entry(const uint8_t *addr, uint8_t addrtype,
+                                    const uint8_t *irk);
+
+  ble_addr_t peer_addrs[CONFIG_BT_NIMBLE_MAX_BONDS];
+  int num_peers;
+  int rc = ble_store_util_bonded_peers(peer_addrs, &num_peers,
+                                       CONFIG_BT_NIMBLE_MAX_BONDS);
+  if (rc != 0) {
+    ESP_LOGE(TAG, "ble_store_util_bonded_peers failed: %d", rc);
+    return;
+  }
+
+  ESP_LOGI(TAG, "restore_resolving_list: found %d bonded peer(s)", num_peers);
+
+  for (int i = 0; i < num_peers; i++) {
+    struct ble_store_key_sec key_sec = {0};
+    struct ble_store_value_sec value_sec;
+    key_sec.peer_addr = peer_addrs[i];
+
+    rc = ble_store_read_peer_sec(&key_sec, &value_sec);
+    ESP_LOGI(TAG,
+             "restore_resolving_list: peer %d addr_type=%d addr=%02x:%02x:%02x:%02x:%02x:%02x rc=%d irk_present=%d",
+             i, peer_addrs[i].type, peer_addrs[i].val[0], peer_addrs[i].val[1],
+             peer_addrs[i].val[2], peer_addrs[i].val[3], peer_addrs[i].val[4],
+             peer_addrs[i].val[5], rc, value_sec.irk_present);
+    if (rc == 0 && value_sec.irk_present) {
+      ble_hs_pvcy_add_entry(value_sec.peer_addr.val, value_sec.peer_addr.type,
+                            value_sec.irk);
+    }
+  }
+}
+
 static void on_sync(void) {
+  restore_resolving_list();
   start_advertising();
   esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
   if (err != ESP_OK) {
@@ -410,9 +444,11 @@ void app_main(void) {
     conn_handles[i] = BLE_HS_CONN_HANDLE_NONE;
   }
 
+
   esp_err_t nvs_ret = nvs_flash_init();
   if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES ||
       nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    ESP_LOGW(TAG, "nvs_flash_init returned %d, erasing NVS entirely", nvs_ret);
     ESP_ERROR_CHECK(nvs_flash_erase());
     nvs_ret = nvs_flash_init();
   }
@@ -443,6 +479,10 @@ void app_main(void) {
   }
 
   nimble_port_init();
+
+  extern void ble_store_config_init(void);
+  ble_store_config_init();
+
   ble_svc_gap_init();
   ble_svc_gatt_init();
   ble_svc_gap_device_name_set("GarageDoor");
@@ -461,6 +501,8 @@ void app_main(void) {
   ble_hs_cfg.sm_bonding = 1;
   ble_hs_cfg.sm_mitm = 1;
   ble_hs_cfg.sm_sc = 1;
+  ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+  ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
   nimble_port_freertos_init(host_task);
 

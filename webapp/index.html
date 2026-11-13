@@ -8,12 +8,43 @@
   </head>
   <body>
     <main class="card">
+      <button id="settings-toggle-btn" class="icon-btn" aria-label="Settings">
+        ⚙
+      </button>
       <h1>Garage Door</h1>
 
       <p id="status-text" class="status status--unknown">Not connected</p>
 
       <button id="connect-btn">Connect</button>
       <button id="toggle-btn" disabled>Open / Close</button>
+
+      <section class="settings" id="settings-section" hidden>
+        <p id="settings-error" class="settings-error"></p>
+
+        <h2>Change Passkey</h2>
+        <input
+          type="number"
+          id="current-passkey"
+          placeholder="Current passkey"
+        />
+        <input type="number" id="new-passkey" placeholder="New passkey" />
+        <button id="change-passkey-btn" disabled>Update Passkey</button>
+
+        <h2>Change OTA Password</h2>
+        <input
+          type="number"
+          id="current-ota-password"
+          placeholder="Current OTA password"
+        />
+        <input
+          type="number"
+          id="new-ota-password"
+          placeholder="New OTA password"
+        />
+        <button id="change-ota-password-btn" disabled>
+          Update OTA Password
+        </button>
+      </section>
     </main>
     <script src="app.js" defer></script>
   </body>
