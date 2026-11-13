@@ -1,12 +1,5 @@
 CompileFlags:
-  # PlatformIO writes the compile database under .pio/, where clangd won't
-  # look on its own. Regenerate with `just compiledb` after changing deps.
-  CompilationDatabase: .pio/build/esp32dev
-  # ESP-IDF 6 builds against picolibc via a -specs file that isn't in the
-  # compile database, so --query-driver reports newlib's headers instead.
-  Add:
-    - -isystem/home/wubbzy/.platformio/packages/toolchain-xtensa-esp-elf/picolibc/include
-  # xtensa-gcc-only flags clang rejects as unknown arguments
+  CompilationDatabase: .
   Remove:
     - -mlongcalls
     - -mdisable-hardware-atomics
