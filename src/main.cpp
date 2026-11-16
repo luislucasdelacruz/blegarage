@@ -1,29 +1,43 @@
 #include "NimBLEAdvertising.h"
+#include "NimBLEAttValue.h"
 #include "NimBLECharacteristic.h"
 #include "NimBLEDevice.h"
 #include "NimBLEServer.h"
 #include "NimBLEService.h"
 #include "esp32-hal-gpio.h"
 #include "esp32-hal.h"
+#include "esp_err.h"
 #include "nimble/nimble/host/include/host/ble_hs.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 #include <Arduino.h>
 #include <cstdint>
+#include <cstring>
 
 #define RELAY_GPIO 26
 #define REED_SWITCH_GPIO 27
 
 #define RELAY_PULSE_MS 500
 #define DEFAULT_BLE_PASSKEY 123456
+#define DEFAULT_OTA_PASSWORD 123456
 
 constexpr char kServiceUuid[] = "c9af0000-1b19-4f33-890b-0d6a1f98b6a1";
 constexpr char kStatusCharUuid[] = "c9af0001-1b19-4f33-890b-0d6a1f98b6a1";
 constexpr char kControlCharUuid[] = "c9af0002-1b19-4f33-890b-0d6a1f98b6a1";
+constexpr char kChangePasskeyCharUuid[] =
+    "c9af0003-1b19-4f33-890b-0d6a1f98b6a1";
+constexpr char kChangeOtaPasswordCharUuuid[] =
+    "c9af0004-1b19-4f33-890b-0d6a1f98b6a1";
 
 NimBLECharacteristic *statusChar = nullptr;
 
 volatile bool relayPulsePending = false;
 bool relayActive = false;
 uint32_t relayPulseStartMs = 0;
+
+nvs_handle_t nvsSecretsHandle;
+uint32_t blePasskey;
+uint32_t otaPassword;
 
 class StatusCallbacks : public NimBLECharacteristicCallbacks {
   void onRead(NimBLECharacteristic *pCharacteristic) override {
@@ -48,8 +62,81 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
 };
 
+bool readSecretPayload(NimBLECharacteristic *pCharacteristic,
+                       uint32_t *currentValue, uint32_t *newValue) {
+  NimBLEAttValue value = pCharacteristic->getValue();
+  if (value.size() == 0) {
+    return false;
+  }
+
+  memcpy(currentValue, value.data(), sizeof(uint32_t));
+  memcpy(newValue, value.data() + sizeof(uint32_t), sizeof(uint32_t));
+  return true;
+}
+
+class ChangePasskeyCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *pCharacteristic) override {
+    uint32_t currentValue, newValue;
+    if (!readSecretPayload(pCharacteristic, &currentValue, &newValue)) {
+      return;
+    }
+    if (currentValue != blePasskey) {
+      return;
+    }
+    blePasskey = newValue;
+    NimBLEDevice::setSecurityPasskey(blePasskey);
+    ESP_ERROR_CHECK(nvs_set_u32(nvsSecretsHandle, "ble_passkey", blePasskey));
+    ESP_ERROR_CHECK(nvs_commit(nvsSecretsHandle));
+  }
+};
+
+class ChangeOtaPasswordCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic *pCharacteristic) override {
+    uint32_t currentValue, newValue;
+    if (!readSecretPayload(pCharacteristic, &currentValue, &newValue)) {
+      return;
+    }
+    if (currentValue != otaPassword) {
+      return;
+    }
+    otaPassword = newValue;
+    ESP_ERROR_CHECK(nvs_set_u32(nvsSecretsHandle, "ota_password", otaPassword));
+    ESP_ERROR_CHECK(nvs_commit(nvsSecretsHandle));
+  }
+};
+
 void setup() {
   Serial.begin(115200);
+
+  esp_err_t nvsRet = nvs_flash_init();
+  if (nvsRet == ESP_ERR_NVS_NO_FREE_PAGES ||
+      nvsRet == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    ESP_ERROR_CHECK(nvs_flash_erase());
+    nvsRet = nvs_flash_init();
+  }
+  ESP_ERROR_CHECK(nvsRet);
+
+  ESP_ERROR_CHECK(nvs_open("secrets", NVS_READWRITE, &nvsSecretsHandle));
+
+  esp_err_t passkeyErr =
+      nvs_get_u32(nvsSecretsHandle, "ble_passkey", &blePasskey);
+  if (passkeyErr == ESP_ERR_NVS_NOT_FOUND) {
+    blePasskey = DEFAULT_BLE_PASSKEY;
+    ESP_ERROR_CHECK(nvs_set_u32(nvsSecretsHandle, "ble_passkey", blePasskey));
+    ESP_ERROR_CHECK(nvs_commit(nvsSecretsHandle));
+  } else {
+    ESP_ERROR_CHECK(passkeyErr);
+  }
+
+  esp_err_t otaPasswordErr =
+      nvs_get_u32(nvsSecretsHandle, "ota_password", &otaPassword);
+  if (otaPasswordErr == ESP_ERR_NVS_NOT_FOUND) {
+    otaPassword = DEFAULT_OTA_PASSWORD;
+    ESP_ERROR_CHECK(nvs_set_u32(nvsSecretsHandle, "ota_password", otaPassword));
+    ESP_ERROR_CHECK(nvs_commit(nvsSecretsHandle));
+  } else {
+    ESP_ERROR_CHECK(otaPasswordErr);
+  }
 
   digitalWrite(RELAY_GPIO, HIGH);
   pinMode(RELAY_GPIO, OUTPUT);
@@ -59,7 +146,7 @@ void setup() {
 
   NimBLEDevice::setSecurityAuth(true, true, true);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
-  NimBLEDevice::setSecurityPasskey(DEFAULT_BLE_PASSKEY);
+  NimBLEDevice::setSecurityPasskey(blePasskey);
 
   NimBLEServer *server = NimBLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
@@ -78,6 +165,18 @@ void setup() {
       kControlCharUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC |
                             NIMBLE_PROPERTY::WRITE_AUTHEN);
   controlChar->setCallbacks(new ControlCallbacks());
+
+  NimBLECharacteristic *changePasskeyChar = service->createCharacteristic(
+      kChangePasskeyCharUuid, NIMBLE_PROPERTY::WRITE |
+                                  NIMBLE_PROPERTY::WRITE_ENC |
+                                  NIMBLE_PROPERTY::WRITE_AUTHEN);
+  changePasskeyChar->setCallbacks(new ChangePasskeyCallbacks());
+
+  NimBLECharacteristic *changeOtaPasswordChar = service->createCharacteristic(
+      kChangeOtaPasswordCharUuuid, NIMBLE_PROPERTY::WRITE |
+                                       NIMBLE_PROPERTY::WRITE_ENC |
+                                       NIMBLE_PROPERTY::WRITE_AUTHEN);
+  changeOtaPasswordChar->setCallbacks(new ChangeOtaPasswordCallbacks());
 
   service->start();
 
